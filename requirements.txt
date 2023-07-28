@@ -1,0 +1,4 @@
+lxml
+papygreektokenizer @ file:///Users/erikhenriksson/Library/Mobile%20Documents/com~apple~CloudDocs/Code/GitHub/papygreek-tokenizer
+python-dotenv
+regex
