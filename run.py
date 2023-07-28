@@ -1,8 +1,11 @@
 import sys
 
 from dotenv import dotenv_values
-from papygreektokenizer import tokenize_file, tokenize_string
+from papygreektokenizer import tokenize_file, tokenize_string, format_tokens_html
+
 import example
+
+from pprint import pprint
 
 config = dotenv_values(".env")
 DDBDP_PATH = config["DDBDP_PATH"]
@@ -23,5 +26,7 @@ if __name__ == "__main__":
         example = example.xml_str
         tokenizer = tokenize_string(example)
         tokens = tokenizer["tokens"]()["tokens"]
-
-        print(tokens)
+        pprint(tokens)
+        exit()
+        pg = " ".join([(x["reg"] or x["orig"])["form_papygreek"] for x in tokens])
+        print(pg)

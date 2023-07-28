@@ -9,34 +9,288 @@ import regex as re
 import glob
 from lxml import etree
 
+
 import unicodedata
 from .wordmatcher import best_match
 from .place import convert_place
 
+
+def remove_node(child, keep_content=False):
+    """
+    Remove an XML element, preserving its tail text.
+
+    :param child: XML element to remove
+    :param keep_content: ``True`` to keep child text and sub-elements.
+    """
+    parent = child.getparent()
+    parent_text = parent.text or ""
+    prev_node = child.getprevious()
+    if keep_content:
+        # insert: child text
+        child_text = child.text or ""
+        if prev_node is None:
+            parent.text = "{0}{1}".format(parent_text, child_text) or None
+        else:
+            prev_tail = prev_node.tail or ""
+            prev_node.tail = "{0}{1}".format(prev_tail, child_text) or None
+        # insert: child elements
+        index = parent.index(child)
+        parent[index:index] = child[:]
+    # insert: child tail
+    parent_text = parent.text or ""
+    prev_node = child.getprevious()
+    child_tail = child.tail or ""
+    if prev_node is None:
+        parent.text = "{0}{1}".format(parent_text, child_tail) or None
+    else:
+        prev_tail = prev_node.tail or ""
+        prev_node.tail = "{0}{1}".format(prev_tail, child_tail) or None
+    # remove: child
+    parent.remove(child)
+
+
 punct = list(",..·;;·.§")
 sent_punct = list(".·;;·.§")
-bracket_symbols = r"[‹›〚〛#\(\)\|❛❜¯\_\\/^~¯↕→←\{\}\[\]\'｣｢”§°]+"
 
-xml_atts = lambda x: (" " if len(x) else "") + (
-    " ".join([f'{k.split("}")[-1]}="{v}"' for k, v in x.items()])
-)
 no_ns_atts = lambda x: {k.split("}")[-1]: v for k, v in x.items()}
-flat_dict = lambda x: "|".join([f'{k.split("}")[-1]}={v}' for k, v in x.items()])
 compose_inner_func = lambda f, g: lambda x: g(f(x))
 composer = lambda *x: reduce(compose_inner_func, x, lambda x: x)
 add_ud = lambda x: "".join(
     [y + "̣" if unicodedata.normalize("NFD", y)[0].lower().isalpha() else y for y in x]
 )
-transpose = lambda m: m and [
-    list(map(lambda r: r[0], m)),
-    *transpose(list(filter(len, map(lambda r: r[1:], m)))),
-]
 flat_list = lambda x: [item for sublist in x for item in sublist]
-parse_flat_atts = lambda a: {x.split("=")[0]: x.split("=")[1] for x in a.split("|")}
-transform_error = lambda f, el, atts, where: exit(
-    f"Error in {where}: no bracket for {el}, {atts}\n {f}"
-)
-str_none = lambda i: i or ""
+
+
+def format_token_html(form: str, token_data: list) -> str:
+    def bracket_grammar(tag, atts):
+        atts_html = " ".join([f"data-att-{x}='{y}'" for x, y in atts.items()])
+        atts_html = (" " + atts_html) if atts_html else atts_html
+        return f"<span data-tag='{tag}'{atts_html}>"
+
+    form_symbols = list(form) + [""]
+    start_brackets = [""] * (len(form_symbols))
+    end_brackets = [""] * (len(form_symbols))
+    for el in token_data:
+        bracket = bracket_grammar(el["tag"], el["atts"])
+        start_brackets[el["start"]] += bracket
+        end_brackets[el["end"]] += "</span>"
+
+    for i, bracket in enumerate(start_brackets):
+        form_symbols[i] = bracket + form_symbols[i]
+    for i, bracket in enumerate(end_brackets):
+        form_symbols[i] = form_symbols[i] + bracket
+
+    return "".join(form_symbols).replace("█", "").replace("⧙⧘", "|").replace("▒", "")
+
+
+def format_tokens_html(tokens: list) -> list:
+    for i, token in enumerate(tokens):
+        token[i]["format_html"] = format_token_html(
+            token["form_unformatted"], token["token_data"]
+        )
+    return tokens
+
+
+def format_papygreek(form: str, token_data: list) -> str:
+    def bracket_grammar(tag, atts):
+        # Uncertain
+        u = "(?)" if atts.get("cert", "") or atts.get("precision", "") else ""
+        match tag:
+            case "supplied":
+                match atts.get("reason", ""):
+                    case "omitted":
+                        return ["<", f"{u}>"]
+                    case "lost":
+                        if atts.get("evidence", "") == "parallel":
+                            return ["_[", f"{u}]_"]
+                        else:
+                            return ["[", f"{u}]"]
+                    case "undefined":
+                        return ["|_", f"{u}_|"]
+            case "surplus":
+                return ["{", "}"]
+            case "del":
+                match atts.get("rend", ""):
+                    case "slashes":
+                        s = "/"
+                    case "cross-strokes":
+                        s = "✕"
+                    case _:
+                        s = ""
+                return [f"〚{s}", f"{u}〛"]
+
+            case "add":
+                match atts.get("place", ""):
+                    case "above":
+                        return ["\\", f"{u}/"]
+                    case "below" | "bottom":
+                        return ["/", f"{u}\\"]
+                    case "left":
+                        return ["||←:", f"{u}||"]
+                    case "right":
+                        return ["||→:", f"{u}||"]
+                    case "interlinear":
+                        return ["||↕:", f"{u}||"]
+                    case "margin":
+                        if atts.get("rend", "") == "underline":
+                            return ["<_", f"{u}_>"]
+                        elif atts.get("rend", "") == "sling":
+                            return ["<|", f"{u}|>"]
+
+            case "hi":
+                match atts.get("rend", ""):
+                    case "supraline":
+                        return ["¯", f"{u}¯"]
+                    case "tall":
+                        return ["~||", f"{u}||~"]
+                    case "superscript":
+                        return ["|^", f"{u}^|"]
+                    case "above":
+                        return ["|^", f"{u}^|"]
+                    case "subscript":
+                        return ["\\|", f"{u}|/"]
+                    case "supraline-underline":
+                        return ["¯_", f"{u}_¯"]
+                    case "underline" | "underlined":
+                        return ["_", f"{u}_"]
+                    case "diaeresis":
+                        return ["", f"(¨{u})"]
+                    case "acute":
+                        return ["", f"(´{u})"]
+                    case "asper":
+                        return ["", f"(῾{u})"]
+                    case "grave":
+                        return ["", f"(`{u})"]
+                    case "circumflex":
+                        return ["", f"(^{u})"]
+                    case "lenis":
+                        return ["", f"(᾿{u})"]
+
+            case "q":
+                return ["❛", f"{u}❜"]
+            case "expan":
+                return ["(", f"{u})"]
+
+            case "ex":
+                u = "?" if atts.get("cert", "") or atts.get("precision", "") else ""
+                return ["(", f"{u})"]
+            case "abbr":
+                u = "?" if atts.get("cert", "") or atts.get("precision", "") else ""
+                return ["(|", f"{u}|)"]
+
+            case "num":
+                u = "?" if atts.get("cert", "") or atts.get("precision", "") else ""
+                return ["", f"{u}"]
+
+            case "milestone":
+                rend = atts.get("rend", "")
+                return [f"*{rend or 'milestone'}*", ""]
+
+            case "g":
+                g_type = atts.get("type", "")
+                u = "(?)" if atts.get("cert", "") else ""
+                match g_type:
+                    case "x":
+                        return [f"*✕{u}*", f""]
+                    case "slanting-stroke":
+                        return [f"*╱{u}*", ""]
+                    case "extension":
+                        return [f"*—{u}*", ""]
+                    case "apostrophe":
+                        return [f"*⸍{u}*", ""]
+                    case "stauros":
+                        return [f"*†{u}", "*"]
+                    case "rho-cross":
+                        return [f"*⳨{u}*", ""]
+                    case "chirho":
+                        return [f"*☧{u}*", ""]
+                    case "check":
+                        return [f"*✓{u}*", ""]
+                    case "middot":
+                        return [f"*‧{u}*", ""]
+                    case "dipunct":
+                        return [f"*∶{u}*", ""]
+                    case "long-vertical-bar":
+                        return [f"*｜{u}*", ""]
+                    case "diastole":
+                        return [f"*⸒{u}*", ""]
+                    case "dot":
+                        return [f"*•{u}*", ""]
+                    case "unintelligible":
+                        return [f"*?{u}*", ""]
+                    case _:
+                        return [f"*{g_type}{u}*", ""]
+
+            case "gap" | "space":
+                pd = "."
+                brackets = {
+                    "lost": ["[", "]"],
+                    "omitted": ["<", ">"],
+                    "illegible": ["", ""],
+                    "ellipsis": ["", ""],
+                    "none": ["", ""],
+                }
+                units = {
+                    "character": "",
+                    "line": "lin",
+                    "column": "col",
+                    "none": "",
+                }
+
+                sp = "vac" if tag == "space" else "_"
+                desc = atts.get("desc", "").lower()
+                if desc:
+                    if desc == "non transcribed":
+                        desc = f"{pd}nontr"
+                    elif desc == "vestiges":
+                        desc = f"{pd}vestig"
+                    else:
+                        desc = f"{pd}{desc}"
+
+                ell = f"{pd}ell" if atts.get("reason", "") == "ellipsis" else ""
+
+                ca = f"{pd}ca" if atts.get("precision", "") else ""
+
+                quantity = atts.get("quantity", "")
+                atleast = atts.get("atLeast", "")
+                atmost = atts.get("atMost", "")
+
+                ext = "?" if atts.get("extent", "") else ""
+                if quantity:
+                    ext = quantity
+                elif atleast and atmost:
+                    ext = atleast + "-" + atmost
+
+                br = brackets[atts.get("reason", "none")]
+
+                prec = (
+                    "?" if (atts.get("precision", "") or atts.get("cert", "")) else ""
+                )
+                unit = units[atts.get("unit", "none")]
+
+                return [f"{br[0]}{sp}{desc}{ell}{ca}{pd}{ext}{unit}{prec}{br[1]}", ""]
+
+        return ["", f"{u}"]
+
+    form_symbols = list(form) + [""]
+    start_brackets = [""] * (len(form_symbols))
+    end_brackets = [""] * (len(form_symbols))
+
+    for el in token_data:
+        if el["tag"] == "unclear":
+            for s in range(el["start"], el["end"] + 1):
+                form_symbols[s] = add_ud(form_symbols[s])
+        else:
+            brackets = bracket_grammar(el["tag"], el["atts"])
+            start_brackets[el["start"]] += brackets[0]
+            end_brackets[el["end"]] = brackets[1] + end_brackets[el["end"]]
+
+    for i, bracket in enumerate(start_brackets):
+        form_symbols[i] = bracket + form_symbols[i]
+    for i, bracket in enumerate(end_brackets):
+        form_symbols[i] = form_symbols[i] + bracket
+
+    return "".join(form_symbols).replace("█", "").replace("⧙⧘", "|").replace("▒", "")
 
 
 def get_edition_xml_str(xml_dom: etree._Element) -> str:
@@ -109,144 +363,24 @@ def create_versions(data: dict) -> dict:
     ->  create_versions
     """
 
-    state = data["state"]
-
-    def remove_symbols(t: str) -> str:
-        replacements = [
-            ("⸦[^⸧]+⸧", ""),
-            ("༺[^༻]+༻", ""),
-            ("⧙[^⧘]+⧘", "|"),
-            ("⦓[^⦔]+⦔", ""),
-            ("⧛[^⧚]+⧚", ""),
-        ]
-        for x, y in replacements:
-            t = re.sub(x, y, t)
-        return t
-
-    def plain(x: str, diplomatic) -> str:
-        diplomatic_symbols = (
-            [
-                "¨",
-                "´",
-                "῾",
-                "`",
-                "^",
-                "᾿",
-                "*",
-                "-",
-                "?",
-                "✕",
-                "╱",
-                "—",
-                "⸍",
-                "†",
-                "⳨",
-                "☧",
-                "✓",
-                "‧",
-                "∶",
-                "｜",
-                "⸒",
-                "•",
-            ]
-            if diplomatic
-            else []
-        )
+    def plain(x: str) -> str:
         return "".join(
             [
                 unicodedata.normalize("NFD", a)[0].lower()
                 for a in x
-                if a.isalpha() or a in punct + ["_"] + diplomatic_symbols
+                if a.isalpha() or a in punct + ["_"]
             ]
         )
-
-    def pre_plain(t: str, diplomatic: bool) -> str:
-        t = re.sub(r"\$(?=.+)", "", t)
-        if not diplomatic:
-            t = re.sub(r"\*(.*?)\*", "", t)
-        return re.sub(r"(｢[^｣]+｣)+", "_", t)
-
-    def remove_gap_marker(t: str) -> str:
-        return re.sub(r"[｢｣]+", "", t)
 
     def version_type(k: str) -> str:
         if not ("reg" in k or "scribaldel" in k or "corr" in k or "rdg" in k):
             return "orig"
-        elif not ("rdg" in k or "scribaldel" in k):
+        elif not ("rdg" in k or "scribaldel" in k):  # These are "var" versions
             return "reg"
         return "var"
 
-    def get_flag_and_info(t: str) -> tuple | str:
-        nonlocal state
-        flag = ""
-        info = []
-        app_type = []
-        paths = re.findall(r"(>[a-z]+\[[0-9]+\])", t)
-        for p in paths:
-            el = re.search("[0-9]+", p)
-            if not el:
-                return ""
-            el_id = int(el.group(0))
-            atts = state["elements"][el_id].attrib
-            if app_t := atts.get("type", ""):
-                app_type.append(app_t)
-            if app_type:
-                if atts.get("cert", ""):
-                    app_type[-1] += "?"
-            if resp := atts.get("resp", ""):
-                info.append(resp)
-
-            if "reg" in p:
-                flag += "r"
-            elif "orig" in p:
-                flag += "o"
-            elif "corr" in p:
-                flag += "c"
-            elif "sic" in p:
-                flag += "s"
-            elif "scribaladd" in p:
-                flag += "a"
-            elif "scribaldel" in p:
-                flag += "d"
-            elif "lem" in p:
-                flag += "l"
-            elif "rdg" in p:
-                flag += "g"
-
-        t = re.sub(r"(>[a-z]+\[[0-9]+\])+", "", t)
-        return t, flag, "/".join(app_type), "/".join(info)
-
-    def get_lang(t: str, lang: str) -> str:
-        if "⸦" in t:
-            if match := re.search("(?<=⸦).+?(?=⸧)", t):
-                return match.group(0)
-        return lang
-
-    def get_hand(t: str, hand: str, aow_n: int) -> tuple:
-        if "༺" in t:  # handshift
-            hand_prev = hand
-            hand = re.findall(r"(?<=༺).+?(?=༻)", t)[-1]
-            if hand_prev != hand:
-                aow_n += 1
-        return hand, aow_n
-
-    def get_line(t: str, line: str, line_rend: str) -> tuple:
-        if "⧙" in t:  # word-medial lb
-            match = re.search("(?<=⧙).+?(?=⧘)", t)
-            if match:
-                line, line_rend = match.group(0).split("⟩")
-        return line, line_rend
-
-    def get_num(t: str, num: str, num_rend: str) -> tuple:
-        if "⦓" in t:  # num
-            if "✓" in t:
-                num_rend = "tick"
-                t.replace("✓", "")
-            if num_match := re.search("(?<=⦓).+?(?=⦔)", t):
-                num = num_match.group(0)
-        return num, num_rend
-
-    lang = "grc"
+    # Initial settings
+    token_lang = "grc"
     document_lang = "grc"
     prev_n = 1
     n = 1
@@ -256,278 +390,291 @@ def create_versions(data: dict) -> dict:
     textpart = []
     line = "1"
     line_rend = ""
+    tokens_data = []
+    increment_sentence = False
+    cancel_increment = False
 
-    token_data = []
-    increment_sentence = 0
-    cancel_increment = 0
+    for token in data["tokens"]:
+        if type(token) == str:
+            token = [token]
 
-    diplomatic = data["state"]["diplomatic"]
+        # The main iteration. If token has no variation, the list will
+        # contain just the single token
+        for t in token:
+            # Init the dict for the result data
+            token_all_data = {"orig": {}, "reg": {}, "var": [], "common": {}}
 
-    for t in data["tokens"]:
-        info = ""
-        skip = 0
-        num = ""
-        num_rend = ""
-        lang = document_lang
+            # Last token had sentence-ending symbol
+            if increment_sentence:
+                sentence_n += 1
+                prev_n = n
+                n = 1
+                increment_sentence = False
 
-        if increment_sentence:
-            sentence_n += 1
-            prev_n = n
-            n = 1
-            increment_sentence = 0
+            # Last token had the symbol ° (for canceling sentence end)
+            if cancel_increment:
+                n = prev_n
+                sentence_n -= 1
+                cancel_increment = False
 
-        if cancel_increment:
-            n = prev_n
-            sentence_n -= 1
-            cancel_increment = 0
+            for t_version in t.split("⧽"):
+                # Get the version. If the token has no variation,
+                # version will be "orig"
+                version = version_type(t_version)
+                num = ""
+                num_rend = ""
+                token_lang = document_lang
 
-        if type(t) == str:
-            if "⸨" in t:
-                atts = parse_flat_atts(t[2:-1])
-                if "lang" in atts:
-                    document_lang = atts["lang"]
-                    lang = document_lang
-                else:
-                    inc_atts = []
-                    if "n" in atts:
-                        inc_atts.append(atts["n"])
-                    if "subtype" in atts:
-                        inc_atts.append(atts["subtype"])
-                    textpart.append(".".join(inc_atts))
-                skip = 1
+                # Get just one regularized version (the first one)
+                if version == "reg":
+                    if token_all_data["reg"]:  # Other regs will be "var" versions
+                        version = "var"
 
-            elif "⸩" in t:
-                try:
-                    textpart.pop()
-                except:
-                    pass
-                skip = 1
+                # If version is orig or reg, get sentence data
+                if version != "var":
+                    if any(s in t_version for s in sent_punct):
+                        increment_sentence = True
 
-            elif "⧛" in t:
-                try:
-                    line, line_rend = t[1:-1].split("⟩")
-                    skip = 1
-                except:
-                    print(t)
-                    print(data["state"])
-                    exit()
+                    if "§" in t_version:
+                        # This symbol (included in sent_punct) marks sentence end.
+                        # Skipping, because this is not a real token
+                        continue
 
-            elif "figure-" in t:
-                if fig_match := re.search("(?<=figure-)[0-9]+", t):
-                    info = state["figures"][int(fig_match.group(0)) - 1]
+                    if "°" in t_version:
+                        # This symbol prevents sentence breaks
+                        cancel_increment = True
+                        continue
 
-            elif "note-" in t:
-                if note_match := re.search("(?<=note-)[0-9]+", t):
-                    info = state["notes"][int(note_match.group(0)) - 1]
+                token_els = {}  # Token elements
+                token_str = ""  # The unformatted string
+                token_edited_str = ""  # Plain edited string
+                token_transcript_str = ""  # Plain pure transcript
 
-            else:
-                if any(s in t for s in sent_punct):
-                    increment_sentence = 1
+                # Break down token to a list of elements and strings
+                t_parts = [
+                    x
+                    for x in re.split(r"((?:[><][a-zA-Z]*)?\[[0-9]+\])", t_version)
+                    if x
+                ]
+                within_supplied = 0
+                within_ex = 0
+                within_surplus = 0
+                token_string_id = 0
+                increment_token_string_id = False
+                decrement_token_string_id = False
+                variation_type = []
+                prev_hand = hand
 
-                if "§" in t:
-                    skip = 1
+                # Iterate elements and strings
+                for t_part in t_parts:
+                    # Test if this part is element (and not string)
+                    element_id = (re.findall(r"\[([0-9]+)\]", t_part) or [""])[0]
 
-                if "°" in t:
-                    cancel_increment = 1
-                    skip = 1
+                    # Got element
+                    if element_id:
+                        # Starting tag or empty tag
 
-                lang = get_lang(t, lang)
-                hand, aow_n = get_hand(t, hand, aow_n)
-                line, line_rend = get_line(t, line, line_rend)
-                num, num_rend = get_num(t, num, num_rend)
+                        if "<" not in t_part:
+                            el = data["state"]["elements"][int(element_id)]
+                            atts = no_ns_atts(el.attrib)
 
-            t = remove_symbols(t)
+                            # Get divs, handshifts and line breaks from non-var versions
+                            if version != "var":
+                                if el.tag == "div":
+                                    if "lang" in atts:
+                                        document_lang = atts["lang"]
+                                        token_lang = document_lang
+                                    else:
+                                        inc_atts = []
+                                        if "n" in atts:
+                                            inc_atts.append(atts["n"])
+                                        if "subtype" in atts:
+                                            inc_atts.append(atts["subtype"])
+                                        textpart.append(".".join(inc_atts))
 
-            if not re.sub(bracket_symbols, "", t).replace("$", ""):
-                skip = 1
+                                if el.tag == "handShift":
+                                    token_str += "▒"
+                                    increment_token_string_id = True
+                                    hand = atts.get("new", hand)
+                                    hand += "?" if atts.get("cert", "") else ""
 
-            plain_t = plain(pre_plain(t, diplomatic), diplomatic)
-            t = remove_gap_marker(t)
+                                if el.tag in ["lb", "l"]:
+                                    line = atts.get("n", line)
+                                    line_rend = atts.get("rend", "")
+                                    if atts.get("break", "") == "no":
+                                        token_str += "█"
+                                        decrement_token_string_id = True
 
-            if not skip:
-                token_data.append(
-                    {
-                        "orig_form": t,
-                        "orig_plain": plain_t,
-                        "orig_flag": "",
-                        "orig_app_type": "",
-                        "orig_num": num,
-                        "orig_num_rend": num_rend,
-                        "orig_lang": lang,
-                        "orig_info": info,
-                        "orig_lemma": None,
-                        "orig_postag": None,
-                        "orig_relation": None,
-                        "orig_head": None,
-                        "reg_form": t,
-                        "reg_plain": plain_t,
-                        "reg_flag": "",
-                        "reg_app_type": "",
-                        "reg_num": num,
-                        "reg_num_rend": num_rend,
-                        "reg_lang": lang,
-                        "reg_info": info,
-                        "reg_lemma": None,
-                        "reg_postag": None,
-                        "reg_relation": None,
-                        "reg_head": None,
-                        "vars": [],
-                        "n": n,
-                        "line": line,
-                        "line_rend": line_rend,
-                        "sentence_n": sentence_n,
-                        "hand": hand,
-                        "aow_n": aow_n,
-                        "textpart": "/".join(textpart),
-                        "artificial": None,
-                        "insertion_id": None,
+                            if el.tag == "foreign":
+                                token_lang = atts.get("lang", token_lang)
+
+                            elif el.tag == "num":
+                                num = atts.get("value", "")
+                                num_rend = atts.get("rend", "")
+
+                            elif el.tag == "supplied":
+                                within_supplied += 1
+
+                            elif el.tag == "ex":
+                                within_ex += 1
+
+                            elif el.tag == "surplus":
+                                within_surplus += 1
+
+                            elif el.tag in ["gap", "space", "milestone", "g"]:
+                                token_str += "█"
+                                increment_token_string_id = True
+
+                                if el.tag == "gap":
+                                    token_edited_str += "_"
+                                    token_transcript_str += "_"
+
+                            elif el.tag in [
+                                "app",
+                                "choice",
+                                "subst",
+                                "lem",
+                                "rdg",
+                                "reg",
+                                "orig",
+                                "scribaladd",
+                                "scribaldel",
+                                "corr",
+                                "sic",
+                            ]:
+                                variation_type.append(el.tag)
+
+                            token_els[element_id] = {
+                                "tag": el.tag,
+                                "start": token_string_id,
+                                "end": token_string_id,
+                                "atts": atts,
+                            }
+
+                            if increment_token_string_id:
+                                token_string_id += 1
+                                increment_token_string_id = False
+
+                            if decrement_token_string_id:
+                                token_string_id -= 1
+                                decrement_token_string_id = False
+
+                        # Ending tag
+                        else:
+                            el = data["state"]["elements"][int(element_id)]
+
+                            if version != "var":
+                                if el.tag == "div":
+                                    try:
+                                        textpart.pop()
+                                    except:
+                                        pass
+
+                                    continue
+
+                            elif el.tag == "foreign":
+                                token_lang = document_lang
+
+                            elif el.tag == "supplied":
+                                within_supplied -= 1
+
+                            elif el.tag == "ex":
+                                within_ex -= 1
+
+                            elif el.tag == "surplus":
+                                within_surplus -= 1
+
+                            token_els[element_id]["end"] = token_string_id - 1
+                            if token_els[element_id]["end"] == -1:
+                                token_els[element_id]["end"] = 0
+
+                    # String part
+                    else:
+                        token_string_id += len(t_part)
+                        token_str += t_part
+
+                        if not (within_supplied or within_ex):
+                            token_transcript_str += t_part
+                        if not within_surplus:
+                            token_edited_str += t_part
+
+                # Hand changed (test here, because token-internal hand change
+                # does not count; see e.g. upz.1.46.xml)
+                if hand != prev_hand:
+                    aow_n += 1
+
+                common_data = {
+                    "n": n,
+                    "sentence_n": sentence_n,
+                    "line": line,
+                    "line_rend": line_rend,
+                    "hand": hand,
+                    "aow_n": aow_n,
+                    "textpart": "/".join(textpart),
+                    "artificial": None,
+                    "insertion_id": None,
+                }
+
+                formatted_token = format_papygreek(token_str, list(token_els.values()))
+                # print(formatted_token)
+                # if re.sub(r"[⸨⸩⧛⧚▒\[\]¯⧛⧚]*", "", formatted_token):
+                if re.sub(r"[⸨⸩⧛⧚▒”\']+", "", token_str) or formatted_token in [
+                    "<(?)>"
+                ]:
+                    token_edited_str_plain = plain(re.sub("_+", "_", token_edited_str))
+                    token_transcript_str_plain = plain(
+                        re.sub("_+", "_", token_transcript_str)
+                    )
+
+                    token_data = list(token_els.values())
+
+                    token_version_data = {
+                        f"{version}_form_unformatted": token_str.replace("⧙", "")
+                        .replace("⧘", "")
+                        .replace("▒", ""),
+                        f"{version}_form": formatted_token,
+                        f"{version}_plain": token_edited_str_plain,
+                        f"{version}_plain_transcript": token_transcript_str_plain,
+                        f"{version}_lang": token_lang,
+                        f"{version}_data": token_data,
+                        f"{version}_num": num,
+                        f"{version}_num_rend": num_rend,
+                        f"{version}_variation_path": "/".join(variation_type),
+                        f"{version}_lemma": None,
+                        f"{version}_postag": None,
+                        f"{version}_relation": None,
+                        f"{version}_head": None,
                     }
+
+                    if version == "var":
+                        token_all_data[version].append(token_version_data)
+                    else:
+                        token_all_data[version] = token_version_data
+
+                    token_all_data["common_data"] = common_data
+            if token_all_data["orig"]:
+                if not token_all_data["reg"]:
+                    token_all_data["reg"] = {
+                        k.replace("orig_", "reg_"): v
+                        for k, v in token_all_data["orig"].items()
+                    }
+
+                if (
+                    token_all_data["reg"]["reg_form_unformatted"] == "$"
+                    and token_all_data["orig"]["orig_form_unformatted"] == "$"
+                ):
+                    continue
+
+                token_all_data["common_data"]["var"] = token_all_data["var"]
+
+                tokens_data.append(
+                    token_all_data["orig"]
+                    | token_all_data["reg"]
+                    | token_all_data["common_data"]
                 )
                 n += 1
 
-        else:
-            for t_word in t:
-                info = ""
-                num = ""
-                num_rend = ""
-                lang = document_lang
-                reg_collected = 0
-                var_data = []
-                orig_data = {}
-                reg_data = {}
-                have_reg = 0
-                have_orig = 0
-                prev_n = n
-
-                if increment_sentence:
-                    sentence_n += 1
-                    n = 1
-                    increment_sentence = 0
-
-                for t_version in t_word.split("⧽"):
-                    v = version_type(t_version)
-
-                    if v == "reg":
-                        if reg_collected:
-                            v = "var"
-                        reg_collected = 1
-
-                    t_version, flag, app_type, info = get_flag_and_info(t_version)
-
-                    if "⧛" in t_version:
-                        line, line_rend = t_version[1:-1].split("⟩")
-
-                    elif "figure-" in t_version:
-                        info_n = 0
-                        if info_n_match := re.search("(?<=figure-)[0-9]+", t_version):
-                            info_n = info_n_match.group(0)
-                        info += "/" + state["figures"][int(info_n) - 1]
-
-                    elif "note-" in t_version:
-                        note_n = 0
-                        if note_n_match := re.search("(?<=note-)[0-9]+", t_version):
-                            note_n = note_n_match.group(0)
-                        info += "/" + state["notes"][int(note_n) - 1]
-
-                    else:
-                        if any(s in t_version for s in sent_punct) and v in [
-                            "orig",
-                            "reg",
-                        ]:
-                            increment_sentence = 1
-
-                        lang = get_lang(t_version, lang)
-                        if v != "var":
-                            hand, aow_n = get_hand(t_version, hand, aow_n)
-                            line, line_rend = get_line(t_version, line, line_rend)
-                        num, num_rend = get_num(t_version, num, num_rend)
-
-                    t_version = remove_symbols(t_version)
-
-                    very_plain = re.sub(bracket_symbols, "", t_version)
-
-                    if very_plain:
-                        if v == "reg":
-                            have_reg = very_plain
-                        elif v == "orig":
-                            have_orig = very_plain
-
-                    plain_t_version = plain(
-                        pre_plain(t_version, diplomatic), diplomatic
-                    )
-                    t_version = remove_gap_marker(t_version)
-
-                    if v == "orig":
-                        orig_data = {
-                            "orig_form": t_version,
-                            "orig_plain": plain_t_version,
-                            "orig_flag": flag,
-                            "orig_app_type": app_type,
-                            "orig_num": num,
-                            "orig_num_rend": num_rend,
-                            "orig_lang": lang,
-                            "orig_info": info,
-                            "orig_lemma": None,
-                            "orig_postag": None,
-                            "orig_relation": None,
-                            "orig_head": None,
-                        }
-                    elif v == "reg":
-                        reg_data = {
-                            "reg_form": t_version,
-                            "reg_plain": plain_t_version,
-                            "reg_flag": flag,
-                            "reg_app_type": app_type,
-                            "reg_num": num,
-                            "reg_num_rend": num_rend,
-                            "reg_lang": lang,
-                            "reg_info": info,
-                            "reg_lemma": None,
-                            "reg_postag": None,
-                            "reg_relation": None,
-                            "reg_head": None,
-                        }
-                    else:
-                        var_data.append(
-                            {
-                                "form": t_version,
-                                "plain": plain_t_version,
-                                "flag": flag,
-                                "app_type": app_type,
-                                "info": info,
-                                "num": num,
-                                "num_rend": num_rend,
-                                "lang": lang,
-                            }
-                        )
-                if not have_reg:
-                    have_reg = "$"
-                if have_orig and not (have_orig == have_reg == "$"):
-                    if not reg_data:
-                        reg_data = {
-                            k.replace("orig", "reg"): v for k, v in orig_data.items()
-                        }
-
-                    common_data = {
-                        "vars": var_data,
-                        "n": n,
-                        "line": line,
-                        "line_rend": line_rend,
-                        "sentence_n": sentence_n,
-                        "hand": hand,
-                        "aow_n": aow_n,
-                        "textpart": "/".join(textpart),
-                        "artificial": None,
-                        "insertion_id": None,
-                    }
-
-                    token_data.append(orig_data | reg_data | common_data)
-
-                    n += 1
-
-        # TODO: Do sentence division more robustly
-
-    return {"tokens": token_data, "state": data["state"]}
+    return {"tokens": tokens_data}
 
 
 def stack_alternatives(data: dict) -> dict:
@@ -545,19 +692,23 @@ def stack_alternatives(data: dict) -> dict:
         for i, t in enumerate(ts):
             t_parts = t.split("⧽")
             for k, part in enumerate(t_parts):
-                t_parts[k] = re.sub(r"(^[^>]+)((>[a-zA-Z]+\[[0-9]+\])+)", r"\2\1", part)
+                t_parts[k] = re.sub(
+                    r"(^[^>]+)((>[a-zA-Z]{2,}\[[0-9]+\])+)", r"\2\1", part
+                )
             ts[i] = "⧽".join(t_parts)
 
         return ts
 
-    def group_recu(ts: list, rg: str) -> list:
+    def group_recu(tokens: list, pattern: str) -> list:
+        # Group tokens by variant containing tag
         res = []
-        for i, j in groupby(ts, lambda x: get_match(x, rg)):
-            k = list(j)
-            if not i:
-                res += k
+        grouped_tokens = groupby(tokens, lambda x: get_match(x, pattern))
+        for i, group_iterator in grouped_tokens:
+            group = list(group_iterator)
+            if not i:  # No group, add as is
+                res += group
                 continue
-            res += [group_recu(k, re.escape(i) + r".*?(>([a-z]+)\[[0-9]+\])")]
+            res += [group_recu(group, re.escape(i) + r".*?(>([a-zA-Z]{2,})\[[0-9]+\])")]
         return res
 
     def stack_variants(x: list | str) -> list | str:
@@ -570,13 +721,8 @@ def stack_alternatives(data: dict) -> dict:
                 and all([type(y) == list for y in x])
                 and all([type(y) == str for y in flat_list(x)])
             ):
-                n = best_match(x, clean_regex=r"(>[a-z]+\[[0-9]+\])+")
-                return [
-                    "⧽".join(
-                        [re.sub(r">(app|choice|subst)\[[0-9]+\]", "", x) for x in l]
-                    )
-                    for l in zip(*n)
-                ]
+                n = best_match(x, clean_regex=r"([><][a-zA-Z]+\[[0-9]+\])")
+                return ["⧽".join(l) for l in zip(*n)]
 
             elif any([type(y) == list for y in x]) and all(
                 [type(y) == str for y in flat_list(x)]
@@ -587,17 +733,20 @@ def stack_alternatives(data: dict) -> dict:
                 my += [stack_variants(i)]
         return my
 
+    # Start by grouping tokens contained in app, choice and subst
+
     grouped_tokens = group_recu(data["tokens"], r"(?<!>)>(app|choice|subst)\[[0-9]+\]")
-    for i, g in enumerate(grouped_tokens):
-        if type(g) == list:
-            old_g = []
+
+    for i, group in enumerate(grouped_tokens):
+        if type(group) == list:
+            old_group = []
             c = 0
-            while g != old_g:
-                old_g = g
-                g = stack_variants(g)
+            while group != old_group:
+                old_group = group
+                group = stack_variants(group)
                 c += 1
 
-            grouped_tokens[i] = move_brackets(list(g))
+            grouped_tokens[i] = move_brackets(list(group))
 
     return {"tokens": grouped_tokens, "state": data["state"]}
 
@@ -615,121 +764,14 @@ def transform_brackets(data: dict) -> dict:
 
     element_stack = data["state"]["elements"]
     tokens = data["tokens"]
-    cur_file = data["state"]["file"]
 
-    def bracket_grammar(tag: str, atts: dict) -> list | None:
-        match tag:
-            case "supplied":
-                match atts.get("reason", ""):
-                    case "omitted":
-                        return ["‹", "›"]
-                    case "lost":
-                        if atts.get("evidence", "") == "parallel":
-                            return ["_[", "]_"]
-                        else:
-                            return ["[", "]"]
-                    case "undefined":
-                        return ["|_", "_|"]
-            case "surplus":
-                return ["{", "}"]
-            case "del":
-                match atts.get("rend", ""):
-                    case "slashes":
-                        s = "/"
-                    case "cross-strokes":
-                        s = "✕"
-                    case _:
-                        s = ""
-                return [f"〚{s}", "〛"]
-
-            case "add":
-                match atts.get("place", ""):
-                    case "above":
-                        return ["\\", "/"]
-                    case "below" | "bottom":
-                        return ["/", "\\"]
-                    case "left":
-                        return ["||←:", "||"]
-                    case "right":
-                        return ["||→:", "||"]
-                    case "interlinear":
-                        return ["||↕:", "||"]
-                    case "margin":
-                        if atts.get("rend", "") == "underline":
-                            return ["‹_", "_›"]
-                        elif atts.get("rend", "") == "sling":
-                            return ["‹|", "|›"]
-
-            case "hi":
-                match atts.get("rend", ""):
-                    case "supraline":
-                        return ["¯", "¯"]
-                    case "tall":
-                        return ["~||", "||~"]
-                    case "superscript":
-                        return ["|^", "^|"]
-                    case "above":
-                        return ["|^", "^|"]
-                    case "subscript":
-                        return ["\\|", "|/"]
-                    case "supraline-underline":
-                        return ["¯_", "_¯"]
-                    case "underline" | "underlined":
-                        return ["_", "_"]
-                    case "diaeresis":
-                        return ["", "(¨)"]
-                    case "acute":
-                        return ["", "(´)"]
-                    case "asper":
-                        return ["", "(῾)"]
-                    case "grave":
-                        return ["", "(`)"]
-                    case "circumflex":
-                        return ["", "(^)"]
-                    case "lenis":
-                        return ["", "(᾿)"]
-                    case _:
-                        return ["", ""]
-
-            case "q":
-                return ["❛", "❜"]
-            case "expan":
-                return ["(", ")"]
-            case "ex":
-                return ["(", ")"]
-            case "abbr":
-                return ["(|", "|)"]
-            case "num":
-                val = atts.get("value", "?") or "?"
-                tick = "✓" if atts.get("rend", "") == "tick" else ""
-                return ["", f"⦓{val}{tick}⦔"]
-
-            case "foreign":
-                l = atts.get("lang", "")
-                return ["", f"⸦{l}⸧"]
-
-            case "l" | "lb":
-                brackets = ["⧙", "⧘"] if atts.get("break", "") == "no" else ["⧛", "⧚"]
-                return [
-                    f' {brackets[0]}{atts.get("n", "?")}⟩{atts.get("rend", "")}{brackets[1]} ',
-                    "",
-                ]
-
-            case "unclear" | "lg" | "seg":
-                return ["", ""]
-
-    def bracket_transformer(br: str, stack_id: int) -> str:
+    def bracket_transformer(direction: str, stack_id: int) -> str:
         nonlocal element_stack
-        m = 0 if br == ">" else 1
+        mode = 0 if direction == ">" else 1
         el = element_stack[stack_id]
         tag = el.tag
-        atts = no_ns_atts(el.attrib)
-        u = "?" if (m and (atts.get("cert", "") or atts.get("precision"))) else ""
 
-        if tags := bracket_grammar(tag, atts):
-            return u + tags[m]
-
-        elif tag in [
+        if tag in [
             "app",
             "choice",
             "subst",
@@ -742,12 +784,9 @@ def transform_brackets(data: dict) -> dict:
             "corr",
             "sic",
         ]:
-            if not m:
-                return f"{br}{tag}[{stack_id}]"
-            return ""
-        else:
-            transform_error(cur_file, tag, atts, "bracket_transform")
-        return ""
+            if mode == 0:
+                return f"{direction}{tag}[{stack_id}]"
+        return f"{direction}e[{stack_id}]"
 
     transformed_tokens = [
         re.sub(
@@ -844,193 +883,74 @@ def transform_tags(data: dict) -> dict:
         create_versions
     """
 
+    def transformer(root: etree._Element) -> str:
+        nonlocal things_i
+        nonlocal things_l
+        nonlocal state
+        transformed = ""
+
+        atts = no_ns_atts(root.attrib)
+
+        if not (len(root) or root.text):  # <el/>
+            if root.tag not in [
+                "supplied",
+                "unclear",
+                "ab",
+                "del",
+                "div",
+                "hi",
+                "add",
+                "q",
+                "w",
+                "r",
+            ]:
+                state["elements"].append(root)
+                # things_l.append(things_i)
+                if root.tag in ["lb", "l"]:
+                    brackets = (
+                        ["⧙", "⧘"] if atts.get("break", "") == "no" else ["⧛", "⧚"]
+                    )
+                    transformed += f" {brackets[0]}[{things_i}]{brackets[1]} "
+                elif root.tag in ["note", "figure"]:
+                    transformed += f" [{things_i}] "
+                else:
+                    transformed += f"[{things_i}]"
+
+                things_i += 1
+
+        else:
+            state["elements"].append(root)
+            things_l.append(things_i)
+            if root.tag == "div":
+                transformed += f" ⸨[{things_i}] "
+            else:
+                sep = " " if root.tag in ["app", "choice", "subst"] else ""
+                transformed += f"{sep}>[{things_i}]"
+
+            things_i += 1
+            if root.text:
+                transformed += re.sub(f'([{"".join(punct)}])', r" \1 ", root.text)
+
+            if len(root):
+                for elem in root.iterchildren(tag=None):
+                    transformed += transformer(elem)
+                    if elem.tail:
+                        transformed += re.sub(
+                            f'([{"".join(punct)}])', r" \1 ", elem.tail
+                        )
+
+            if root.tag == "div":
+                transformed += f" ⸩ "
+            else:
+                transformed += f"<[{things_l[-1]}]"
+            things_l.pop()
+
+        return transformed
+
     root = data["root"]
     state = data["state"]
     things_i = 0
     things_l = []
-    unclear = 0
-    diplomatic = data["state"]["diplomatic"]
-
-    def symbolify(el: etree._Element, unclear: int) -> str:
-        nonlocal state
-        nonlocal diplomatic
-        tag = el.tag
-        atts = no_ns_atts(el.attrib)
-        match tag:
-            case "lb" | "l":
-                brackets = ["⧙", "⧘"] if atts.get("break", "") == "no" else ["⧛", "⧚"]
-                return f' {brackets[0]}{atts.get("n", "?")}⟩{atts.get("rend", "")}{brackets[1]} '
-
-            case "milestone":
-                rend = atts.get("rend", "")
-                return f'*{rend or "milestone"}*'
-
-            case "g":
-                g_type = atts.get("type", "")
-                u = "(?)" if unclear else ""
-                match g_type:
-                    case "x":
-                        return f"*✕{u}*"
-                    case "slanting-stroke":
-                        return f"*╱{u}*"
-                    case "extension":
-                        return f"*—{u}*"
-                    case "apostrophe":
-                        return f"*⸍{u}*"
-                    case "stauros":
-                        return f"*†{u}*"
-                    case "rho-cross":
-                        return f"*⳨{u}*"
-                    case "chirho":
-                        return f"*☧{u}*"
-                    case "check":
-                        return f"*✓{u}*"
-                    case "middot":
-                        return f"*‧{u}*"
-                    case "dipunct":
-                        return f"*∶{u}*"
-                    case "long-vertical-bar":
-                        return f"*｜{u}*"
-                    case "diastole":
-                        return f"*⸒{u}*"
-                    case "dot":
-                        return f"*•{u}*"
-                    case "unintelligible":
-                        return f"*?{u}*"
-                    case _:
-                        return f"*{g_type}{u}*"
-
-            case "gap" | "space":
-                pd = "․"
-                brackets = {
-                    "lost": ["[", "]"],
-                    "omitted": ["‹", "›"],
-                    "illegible": ["", ""],
-                    "ellipsis": ["", ""],
-                    "none": ["", ""],
-                }
-                units = {
-                    "character": "",
-                    "line": "lin",
-                    "column": "col",
-                    "none": "",
-                }
-
-                sp = "vac" if tag == "space" else "_"
-                desc = atts.pop("desc", "").lower()
-                if desc:
-                    if desc == "non transcribed":
-                        desc = f"{pd}nontr"
-                    elif desc == "vestiges":
-                        desc = f"{pd}vestig"
-                    else:
-                        desc = f"{pd}{desc}"
-
-                ell = f"{pd}ell" if atts.get("reason", "") == "ellipsis" else ""
-
-                ca = f"{pd}ca" if atts.get("precision", "") else ""
-
-                quantity = atts.pop("quantity", "")
-                atleast = atts.pop("atLeast", "")
-                atmost = atts.pop("atMost", "")
-
-                ext = "?" if atts.get("extent", "") else ""
-                if quantity:
-                    ext = quantity
-                elif atleast and atmost:
-                    ext = atleast + "-" + atmost
-
-                br = brackets[atts.get("reason", "none")]
-
-                prec = (
-                    "?" if (atts.get("precision", "") or atts.get("cert", "")) else ""
-                )
-                unit = units[atts.get("unit", "none")]
-
-                return f"｢{br[0]}{sp}{desc}{ell}{ca}{pd}{ext}{unit}{prec}{br[1]}｣"
-
-            case "note":
-                note = []
-                note_text = atts.pop("text", "")
-                note_ref = atts.pop("ref_n", "")
-                note_ref_text = atts.pop("ref_text", "")
-                if note_text:
-                    note.append(note_text)
-                if note_ref:
-                    note.append(f"(ref:{note_ref})")
-                if note_ref_text:
-                    note.append(f"({note_ref_text})")
-                state["notes"].append(" ".join(note))
-                return f' note-{len(state["notes"])} '
-
-            case "figure":
-                state["figures"].append(
-                    atts.get("desc", "") + ("(?)" if atts.get("cert", "") else "")
-                )
-                return f' figure-{len(state["figures"])} '
-
-            case "handShift":
-                n = atts.pop("new", "")
-                u = "?" if atts.get("cert", "") else ""
-                return f"༺{n}{u}༻"
-
-            case "supplied" | "unclear" | "ab" | "del" | "div" | "hi" | "add" | "q" | "w" | "r":
-                return ""
-
-            case _:
-                if not diplomatic:
-                    transform_error(state["file"], tag, atts, "symbolize")
-                else:
-                    return ""
-        return ""
-
-    def pre_tokenize(s: str, unclear: int) -> str:
-        s = add_ud(s) if unclear else s
-        return re.sub(f'([{"".join(punct)}])', r" \1 ", s)
-
-    def transformer(root: etree._Element) -> str:
-        nonlocal things_i
-        nonlocal things_l
-        nonlocal unclear
-        nonlocal state
-        transf = ""
-        unclear = 1 if root.tag == "unclear" else unclear
-        if not (len(root) or root.text):  # <el/>
-            transf += symbolify(root, unclear)
-        else:
-            if root.tag == "div":
-                atts = no_ns_atts(root.attrib)
-                l = root.attrib.pop("lang", "")
-                atts.pop("space", "")
-                atts.pop("type", "")
-                if l:
-                    transf += f" ⸨[lang={l}] "
-                else:
-                    transf += f" ⸨[{flat_dict(atts)}] "
-            else:
-                state["elements"].append(root)
-                things_l.append(things_i)
-
-                sep = " " if root.tag in ["app", "choice", "subst"] else ""
-
-                transf += f"{sep}>[{things_i}]"
-                things_i += 1
-            if root.text:
-                transf += pre_tokenize(root.text, unclear)
-
-            if len(root):
-                for elem in root.iterchildren(tag=None):
-                    transf += transformer(elem)
-                    if elem.tail:
-                        transf += pre_tokenize(elem.tail, unclear)
-
-            if root.tag == "div":
-                transf += " ⸩ "
-            else:
-                transf += f"<[{things_l[-1]}]"
-                things_l.pop()
-        unclear = 0 if root.tag == "unclear" else unclear
-        return transf
 
     transformed = transformer(root)
 
@@ -1048,29 +968,10 @@ def preformat(data: dict) -> dict:
         create_versions
     """
 
-    def remove_keeping_tail(node):
-        if node.tail:
-            previous = node.getprevious()
-            if (
-                previous is not None
-            ):  # if there is a previous sibling it will get the tail
-                if previous.tail is None:
-                    previous.tail = node.tail
-                else:
-                    previous.tail = previous.tail + node.tail
-            else:  # The parent will get the tail as text
-                parent = node.getparent()
-                if parent.text is None:
-                    parent.text = node.tail
-                else:
-                    parent.text = parent.text + node.tail
-
-        node.getparent().remove(node)
-
     xml_str = data["text"]
     replacements = [
         (r"<[\/]?ab>", ""),
-        (r"<num[^>]*\/>", ""),
+        # (r"<num[^>]*\/>", ""),
         (r"\s+<\/ex>", "-?</ex>"),
         (r"</lem>([\s\S]*?)<rdg", "</lem><rdg"),
         (r' break="no"/><choice', "/><choice"),
@@ -1113,37 +1014,31 @@ def preformat(data: dict) -> dict:
     for bad in root.xpath(
         ".//p|.//locus|.//div[@type='bibliography']|.//div[@type='commentary']"
     ):
-        remove_keeping_tail(bad)
-
-    if data["state"]["diplomatic"]:
-        for bad in root.xpath(
-            ".//ex|.//note|.//figure|.//ref|.//g|.//desc|.//figDesc|.//handShift"
-        ):
-            remove_keeping_tail(bad)
-        for s in root.xpath(".//supplied"):
-            s.text = "_"
+        remove_node(bad)
 
     for x in root.xpath(
         './/app|.//certainty|.//desc|.//figDesc|.//ref|.//g|.//note|.//del[@rend="corrected"]|.//add[@place="inline"]|num|.//reg[@xml:lang]'
     ):
         match x.tag:
-            case "app":
-                app_type = x.attrib.get("type", "")
-                for c in x.getchildren():
-                    if c.tag in ["lem", "rdg"]:
-                        c.attrib["type"] = app_type
+            # case "app":
+            #    app_type = x.attrib.get("type", "")
+            #    for c in x.getchildren():
+            #        if c.tag in ["lem", "rdg"]:
+            #            c.attrib["type"] = app_type
             case "certainty":
                 x.getparent().attrib["cert"] = "low"
-                remove_keeping_tail(x)
+                remove_node(x)
             case "desc" | "figDesc":
                 x.getparent().attrib["desc"] = x.text
-                remove_keeping_tail(x)
+                remove_node(x)
             case "ref":
                 x.getparent().attrib["ref_n"] = x.attrib.get("n", "")
                 x.getparent().attrib["ref_text"] = x.text
-                remove_keeping_tail(x)
+                remove_node(x)
             case "g":
                 x.text = ""
+                if list(x.iterancestors(tag="unclear")):
+                    x.attrib["cert"] = "low"
             case "note":
                 if len(x):
                     x.attrib["text"] = stringify_children(x).strip()
@@ -1151,8 +1046,9 @@ def preformat(data: dict) -> dict:
                         if not c.tag == "ref":
                             x.remove(c)
                 else:
-                    x.attrib["text"] = x.text or ""
-                x.text = ""
+                    x.attrib["text"] = x.text or "note"
+                x.text = "note"
+                x.text = f" {x.text} "
 
             case "del":
                 x.tag = "scribaldel"
@@ -1163,6 +1059,13 @@ def preformat(data: dict) -> dict:
             # case 'reg':
             #    x.tag = 'langreg'
             #    x.attrib.clear()=
+
+    for x in root.xpath(".//figure"):
+        x.text = " figure "
+
+    for x in root.xpath(".//unclear"):
+        if not ((x.text or "").strip() or len(x)):
+            remove_node(x, True)
 
     for x in root.xpath(
         ".//lem|.//rdg|.//scribaladd|.//scribaldel|.//reg|.//orig|.//sic|.//corr"
@@ -1339,8 +1242,8 @@ def get_hgv_meta(hgv_path: str, hgvs: list, file_name: str) -> dict:
             if provtype in ["written", "found"]:
                 for p in prov.xpath(".//placeName"):
                     main_type = p.attrib.get("type", "ancient")
-                    sub_type = str_none(p.attrib.get("subtype", "")).strip()
-                    place_name = str_none(p.text).strip()
+                    sub_type = p.attrib.get("subtype", "").strip()
+                    place_name = (p.text or "").strip()
                     if main_type == "ancient":
                         if not sub_type:
                             hgv_data[provtype]["ancient"].add(place_name)
@@ -1389,14 +1292,11 @@ def init_tokenizer(xml_str: str, state: dict) -> object:
     )({"text": xml_str, "state": state})
 
 
-def init_state(xml_file_path: str, diplomatic: bool) -> dict:
+def init_state(xml_file_path: str) -> dict:
     # Init the global state of the tokenizer
     return {
         "elements": [],
-        "notes": [],
-        "figures": [],
         "file": xml_file_path,
-        "diplomatic": diplomatic,
     }
 
 
@@ -1404,13 +1304,12 @@ def tokenize_file(
     # Tokenize an EpiDoc XML file
     xml_file_path: str,
     hgv_path: str = "",
-    diplomatic: bool = False,
 ) -> dict:
     xml_dom = remove_ns(etree.parse(xml_file_path, parser=None))
     meta = get_meta(xml_dom, xml_file_path)
     xml_str = get_edition_xml_str(xml_dom)
 
-    state = init_state(xml_file_path, diplomatic)
+    state = init_state(xml_file_path)
     return {
         "meta": meta,
         "hgv_meta": lambda: get_hgv_meta(hgv_path, meta["hgv"], meta["name"]),
@@ -1419,9 +1318,9 @@ def tokenize_file(
     }
 
 
-def tokenize_string(xml_str: str, diplomatic: bool = False) -> dict:
+def tokenize_string(xml_str: str) -> dict:
     # Tokenize an EpiDoc XML string
-    state = init_state("", diplomatic)
+    state = init_state("")
 
     return {
         "edition_xml": xml_str,

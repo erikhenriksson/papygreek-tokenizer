@@ -2,7 +2,16 @@ import difflib
 import re
 from copy import copy
 from collections.abc import Iterable, Generator
-from itertools import combinations, zip_longest
+from itertools import combinations, zip_longest, islice
+
+import unicodedata
+
+
+def strip_accents(s):
+    return "".join(
+        c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn"
+    )
+
 
 r_del = lambda s, r: re.sub(r, "", s)
 
@@ -60,11 +69,31 @@ def diff_ratio(x: str, y: str, r: str, sep: str) -> float:
 
     y = "⧽".join([x if x or i == 0 else x_parts[i - 1] for i, x in enumerate(x_parts)])
     x = "⧽".join([z if z or i == 0 else y_parts[i - 1] for i, z in enumerate(y_parts)])
-    y = y if y.replace("$", "").replace("⧽", "") else "$"
-    x = x if x.replace("$", "").replace("⧽", "") else "$"
+    y = strip_accents(y).lower() if y.replace("$", "").replace("⧽", "") else "$"
+    x = strip_accents(x).lower() if x.replace("$", "").replace("⧽", "") else "$"
+    # print(x, y)
     ratio = difflib.SequenceMatcher(lambda x: x == sep, x, y).ratio() * len(
         min([x, y], key=len)
     )
+
+    shorter = [x, y].pop([x, y].index(min([x, y], key=len)))
+    longer = y if shorter == x else x
+    longer_made_shorter = longer[: len(shorter)]
+
+    if len(shorter) > 2:
+        shorter = "".join(islice(shorter, None, len(shorter) // 2))
+        longer_made_shorter = "".join(
+            islice(longer_made_shorter, None, len(longer_made_shorter) // 2)
+        )
+
+        # print(shorter, longer_made_shorter)
+
+        beginning_ratio = difflib.SequenceMatcher(
+            lambda x: x == sep, shorter, longer_made_shorter
+        ).ratio()
+
+        ratio += beginning_ratio / 3
+    # print(ratio)
     return ratio
 
 
@@ -141,11 +170,22 @@ def pad_and_get_ratio(
 
 def best_match(lists: list, clean_regex: str, sep: str = "$") -> list:
     list_prefixes = []
+    list_suffixes = []
+
     for x in lists:
-        if match := re.search(clean_regex, x[0]):
-            list_prefixes.append(match.group(0))
-        else:
-            list_prefixes.append("")
+        list_prefix = ""
+        list_suffix = ""
+        included_ids = set()
+        for el in re.findall(clean_regex, x[0]):
+            if ">" in el and len(el.split(">")[-1].split("[")[0]) > 1:
+                included_ids.add(el.split("[")[-1].split("]")[0])
+                list_prefix += el
+            elif "<" in el:
+                if el.split("[")[-1].split("]")[0] in included_ids:
+                    list_suffix += el
+
+        list_prefixes.append(list_prefix)
+        list_suffixes.append(list_suffix)
 
     pairs = list(combinations(lists, 2))
     list_vs = [[] for _ in lists]
@@ -169,7 +209,7 @@ def best_match(lists: list, clean_regex: str, sep: str = "$") -> list:
 
         sorted_pairs = sorted(possible_word_pairings, key=lambda x: x[1], reverse=True)
         best_pair = []
-        best_score = 0
+        best_score = -1
 
         for pair_i in range(len(sorted_pairs)):
             remaining_pairs, fixed_pairs = fix_pairs(copy(sorted_pairs), [], pair_i)
@@ -182,9 +222,7 @@ def best_match(lists: list, clean_regex: str, sep: str = "$") -> list:
                 longer, shorter, fixed_pairs, clean_regex, sep
             )
 
-            # print(f'pair: (ratio {ratio})')
-            # print(tabulate([new_longer, new_shorter]))
-            if ratio >= best_score:
+            if ratio > best_score:
                 best_score = ratio
                 best_pair = [new_longer, new_shorter]
 
@@ -198,12 +236,13 @@ def best_match(lists: list, clean_regex: str, sep: str = "$") -> list:
     for i, l in enumerate(list_vs):
         for k, it in enumerate(l):
             if it == "$":
-                list_vs[i][k] = list_prefixes[i] + it
-
+                list_vs[i][k] = list_prefixes[i] + it + list_suffixes[i]
     maxlen = len(max(list_vs, key=len))
 
     # Pad
     for i, sublist in enumerate(list_vs):
-        list_vs[i] = sublist + [list_prefixes[i] + "$"] * (maxlen - len(sublist))
+        list_vs[i] = sublist + [list_prefixes[i] + "$" + list_suffixes[i]] * (
+            maxlen - len(sublist)
+        )
 
     return list_vs
