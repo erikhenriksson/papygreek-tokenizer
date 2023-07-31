@@ -472,13 +472,13 @@ def create_versions(data: dict) -> dict:
 
                     # Got element
                     if element_id:
+                        # Get data
+                        el = data["state"]["elements"][int(element_id)]
+                        atts = no_ns_atts(el.attrib)
+
                         # Starting tag or empty tag
-
                         if "<" not in t_part:
-                            el = data["state"]["elements"][int(element_id)]
-                            atts = no_ns_atts(el.attrib)
-
-                            # Get divs, handshifts and line breaks from non-var versions
+                            # Skip the following if this is "var"
                             if version != "var":
                                 if el.tag == "div":
                                     if "lang" in atts:
@@ -513,8 +513,10 @@ def create_versions(data: dict) -> dict:
                                 num_rend = atts.get("rend", "")
 
                             elif el.tag == "supplied":
+                                if atts.get("reason", "") != "omitted":
+                                    token_transcript_str += "_"
                                 within_supplied += 1
-
+                                    
                             elif el.tag == "ex":
                                 within_ex += 1
 
@@ -561,8 +563,7 @@ def create_versions(data: dict) -> dict:
 
                         # Ending tag
                         else:
-                            el = data["state"]["elements"][int(element_id)]
-
+                            # Skip the following if this is "var"
                             if version != "var":
                                 if el.tag == "div":
                                     try:
@@ -572,7 +573,7 @@ def create_versions(data: dict) -> dict:
 
                                     continue
 
-                            elif el.tag == "foreign":
+                            if el.tag == "foreign":
                                 token_lang = document_lang
 
                             elif el.tag == "supplied":
