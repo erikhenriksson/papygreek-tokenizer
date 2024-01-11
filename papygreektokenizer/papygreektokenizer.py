@@ -516,7 +516,7 @@ def create_versions(data: dict) -> dict:
                                 if atts.get("reason", "") != "omitted":
                                     token_transcript_str += "_"
                                 within_supplied += 1
-                                    
+
                             elif el.tag == "ex":
                                 within_ex += 1
 
@@ -1277,6 +1277,7 @@ def get_meta(xml_dom: etree._Element, xml_file_path: str) -> dict:
         "last_change": datetime.strptime(
             (xml_dom.xpath(".//change/@when") or ["9999-12-31"])[0][:10], "%Y-%m-%d"
         ),
+        "place_name": "".join(xml_dom.xpath(".//placeName/text()")) or "",
     }
 
 
